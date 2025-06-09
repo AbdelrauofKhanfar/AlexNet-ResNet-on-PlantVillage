@@ -1,0 +1,243 @@
+!pip install -q transformers datasets timm torchvision
+
+
+import torch
+import torchvision
+import timm
+from transformers import ViTFeatureExtractor, ViTForImageClassification
+from datasets import load_dataset
+
+print("All libraries imported successfully!")
+
+
+
+import torch
+from datasets import load_dataset
+from transformers import ViTForImageClassification, ViTFeatureExtractor, TrainingArguments, Trainer
+from torchvision.transforms import Compose, Resize, ToTensor, Normalize
+from PIL import Image
+import numpy as np
+
+# Check GPU availability
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
+
+
+from google.colab import files
+files.upload()  # Upload your kaggle.json here
+
+
+!mkdir -p ~/.kaggle
+!cp kaggle.json ~/.kaggle/
+!chmod 600 ~/.kaggle/kaggle.json
+
+# Download the dataset
+!kaggle datasets download -d emmarex/plantdisease
+!unzip -q plantdisease.zip -d plantvillage
+
+
+import os
+
+# Check the structure of the extracted dataset
+os.listdir('plantvillage')
+
+
+print(os.listdir('plantvillage/PlantVillage'))
+
+
+from PIL import UnidentifiedImageError
+from torch.utils.data import Dataset, DataLoader
+from torchvision import transforms
+from sklearn.model_selection import train_test_split
+import os
+from PIL import Image
+
+# Define the transformation (resize, normalize, convert to tensor)
+transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # Pretrained ViT mean/std
+])
+
+class PlantVillageDataset(Dataset):
+    def __init__(self, data_dir, transform=None):
+        self.data_dir = data_dir
+        self.transform = transform
+        self.image_paths = []
+        self.labels = []
+        self.class_names = os.listdir(data_dir)
+
+        # Loop through each class and find image paths
+        for label, class_name in enumerate(self.class_names):
+            class_dir = os.path.join(data_dir, class_name)
+            for img_name in os.listdir(class_dir):
+                img_path = os.path.join(class_dir, img_name)
+                try:
+                    # Check if the file is a valid image
+                    img = Image.open(img_path)
+                    img.verify()  # Verify the image is not corrupted
+                    self.image_paths.append(img_path)
+                    self.labels.append(label)
+                except (UnidentifiedImageError, IOError):
+                    print(f"Skipping invalid image: {img_path}")
+                    continue  # Skip invalid files
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitem__(self, idx):
+        img_path = self.image_paths[idx]
+        label = self.labels[idx]
+
+        # Load image
+        img = Image.open(img_path).convert("RGB")
+
+        if self.transform:
+            img = self.transform(img)
+
+        return img, label
+
+# Path to the extracted data
+data_dir = 'plantvillage/PlantVillage'
+
+# Load the full dataset and split into train and test sets
+dataset = PlantVillageDataset(data_dir=data_dir, transform=transform)
+
+print(f"Number of classes: {len(dataset.class_names)}")
+print("Class names:")
+print(dataset.class_names)
+
+# Split the dataset into training and test sets
+train_size = int(0.8 * len(dataset))
+test_size = len(dataset) - train_size
+train_dataset, test_dataset = torch.utils.data.random_split(dataset, [train_size, test_size])
+
+# DataLoader for batching
+train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
+
+print(f"Loaded {len(train_loader.dataset)} training images and {len(test_loader.dataset)} test images.")
+
+
+import torchvision.models as models
+from torch.optim import Adam
+import torch.nn as nn
+
+# Load pretrained AlexNet
+model = models.alexnet(pretrained=True)
+
+# Replace the classifier's final layer to match the number of classes (15)
+model.classifier[6] = nn.Linear(4096, len(dataset.class_names))
+
+# Move model to device
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model.to(device)
+
+# Define optimizer and loss function
+optimizer = Adam(model.parameters(), lr=1e-4)  # Slightly higher LR than ViT
+loss_fn = nn.CrossEntropyLoss()
+
+print("✅ AlexNet model setup complete.")
+
+
+# Training parameters
+epochs = 5  # You can increase further if needed
+best_accuracy = 0.0
+
+for epoch in range(epochs):
+    model.train()
+    running_loss = 0.0
+    correct_predictions = 0
+    total_predictions = 0
+
+    for imgs, labels in train_loader:
+        imgs = imgs.to(device)
+        labels = labels.to(device)
+
+        optimizer.zero_grad()
+        outputs = model(imgs)  # 🔧 No `.logits` here
+        loss = loss_fn(outputs, labels)
+        loss.backward()
+        optimizer.step()
+
+        running_loss += loss.item()
+        _, preds = torch.max(outputs, dim=1)
+        correct_predictions += torch.sum(preds == labels).item()
+        total_predictions += labels.size(0)
+
+    epoch_loss = running_loss / len(train_loader)
+    epoch_accuracy = correct_predictions / total_predictions
+
+    print(f"Epoch {epoch+1}/{epochs}")
+    print(f"Train Loss: {epoch_loss:.4f}, Accuracy: {epoch_accuracy:.4f}")
+
+    if epoch_accuracy > best_accuracy:
+        best_accuracy = epoch_accuracy
+        torch.save(model.state_dict(), "best_alexnet_model.pth")
+        print(f"Model saved with accuracy {epoch_accuracy:.4f}")
+
+# 🔍 Evaluate on test set
+model.eval()
+correct = 0
+total = 0
+
+with torch.no_grad():
+    for imgs, labels in test_loader:
+        imgs = imgs.to(device)
+        labels = labels.to(device)
+        outputs = model(imgs)
+        _, preds = torch.max(outputs, dim=1)
+        correct += (preds == labels).sum().item()
+        total += labels.size(0)
+
+test_accuracy = correct / total
+print(f"\n✅ Test Accuracy: {test_accuracy:.4f}")
+
+
+import os
+print(os.listdir())
+
+
+
+from google.colab import files
+files.download('best_alexnet_model.pth')
+
+
+from PIL import Image
+import torchvision.transforms as transforms
+import torch
+
+# Load model
+model = models.alexnet(pretrained=False)
+model.classifier[6] = nn.Linear(model.classifier[6].in_features, len(dataset.class_names))
+model.load_state_dict(torch.load("best_alexnet_model.pth", map_location=device))
+model.to(device)
+model.eval()
+
+# Upload an image from your PC
+from google.colab import files
+uploaded = files.upload()
+
+# Load and preprocess image
+img_path = list(uploaded.keys())[0]
+img = Image.open(img_path).convert("RGB")
+
+transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                         std=[0.229, 0.224, 0.225])
+])
+
+img_tensor = transform(img).unsqueeze(0).to(device)
+
+# Inference
+with torch.no_grad():
+    outputs = model(img_tensor)
+    _, predicted = torch.max(outputs, 1)
+    predicted_class = dataset.class_names[predicted.item()]
+
+print(f"🧠 Predicted class: {predicted_class}")
+
+
+
